@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+
+archive/
+glass_recordings/
+video_analysis/
+finger_sessions/
+finger_recordings_archive/
+archive/experiments/*/finger_sessions/
+
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.task
