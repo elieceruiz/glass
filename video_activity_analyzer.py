@@ -25,10 +25,20 @@ DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_EVERY_SECONDS = 120
 BATCH_SIZE = 6
 JPEG_QUALITY = 90
+OPENAI_TIMEOUT_SECONDS = 180
+
+
+def log(message):
+    """Imprime progreso inmediatamente para que Streamlit/CLI no parezcan congelados."""
+    print(message, flush=True)
 
 
 def now_stamp():
     return time.strftime("%Y%m%d-%H%M%S")
+
+
+def log_timestamp():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def seconds_to_timestamp(seconds):
@@ -89,6 +99,12 @@ def create_analysis_dirs():
     return analysis_path, frames_path
 
 
+def write_analysis_error(analysis_path, message):
+    error_path = Path(analysis_path) / "analysis_error.txt"
+    error_path.write_text(str(message).strip() + "\n", encoding="utf-8")
+    return error_path
+
+
 def open_video(video_path):
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -115,13 +131,13 @@ def extract_frames(video_path, every_seconds):
     target_frame = 0
     index = 1
 
-    print("=== Extraccion de frames ===")
-    print(f"Video: {video_path}")
-    print(f"FPS real: {fps:.6f}")
-    print(f"Frames totales: {frame_count}")
-    print(f"Duracion total: {seconds_to_timestamp(duration)}")
-    print(f"Intervalo solicitado: cada {every_seconds} segundos")
-    print(f"Paso aproximado: {step_frames} frames")
+    log("=== Extraccion de frames ===")
+    log(f"Video: {video_path}")
+    log(f"FPS real: {fps:.6f}")
+    log(f"Frames totales: {frame_count}")
+    log(f"Duracion total: {seconds_to_timestamp(duration)}")
+    log(f"Intervalo solicitado: cada {every_seconds} segundos")
+    log(f"Paso aproximado: {step_frames} frames")
 
     while target_frame < frame_count:
         capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
@@ -145,7 +161,7 @@ def extract_frames(video_path, every_seconds):
             "timestamp": timestamp,
             "path": frame_path,
         })
-        print(f"Frame {index}: frame_index={actual_frame} timestamp={timestamp} -> {frame_path.name}")
+        log(f"Frame {index}: frame_index={actual_frame} timestamp={timestamp} -> {frame_path.name}")
 
         index += 1
         target_frame += step_frames
@@ -159,7 +175,27 @@ def frame_batches(frames, batch_size):
         yield frames[start:start + batch_size]
 
 
-def analyze_batch(client, batch, model):
+def request_openai_json(client, *, model, input_payload, fallback, label):
+    started = time.monotonic()
+    log(f"{label} iniciado | modelo={model} | inicio={log_timestamp()} | timeout={OPENAI_TIMEOUT_SECONDS}s")
+    try:
+        response = client.responses.create(
+            model=model,
+            input=input_payload,
+            timeout=OPENAI_TIMEOUT_SECONDS,
+        )
+    except TypeError:
+        response = client.responses.create(
+            model=model,
+            input=input_payload,
+        )
+    duration = time.monotonic() - started
+    raw_text = getattr(response, "output_text", "") or ""
+    log(f"{label} respuesta recibida | duracion={duration:.1f}s | caracteres={len(raw_text)}")
+    return parse_json_response(raw_text, fallback)
+
+
+def analyze_batch(client, batch, model, batch_index):
     prompt = (
         "Analiza estos frames extraidos de un video largo para crear una bitacora general de habitos, rutinas, actividades y eventos. "
         "No hay audio ni video completo, solo imagenes individuales. "
@@ -202,21 +238,27 @@ def analyze_batch(client, batch, model):
         ]
     }
 
+    label = f"Lote {batch_index}"
+    log(f"{label} iniciado | frames={len(batch)} | modelo={model} | inicio={log_timestamp()}")
+    started = time.monotonic()
     try:
-        response = client.responses.create(
+        data = request_openai_json(
+            client,
             model=model,
-            input=[{"role": "user", "content": content}],
+            input_payload=[{"role": "user", "content": content}],
+            fallback=fallback,
+            label=f"{label} request OpenAI",
         )
-        data = parse_json_response(response.output_text, fallback)
     except OpenAIError as exc:
-        data = fallback
-        for item in data["items"]:
-            item["observaciones"] = f"OpenAIError: {exc}"
+        duration = time.monotonic() - started
+        log(f"{label} error OpenAI | duracion={duration:.1f}s | {type(exc).__name__}: {exc}")
+        raise RuntimeError(f"{label} fallo en OpenAI: {type(exc).__name__}: {exc}") from exc
     except Exception as exc:
-        data = fallback
-        for item in data["items"]:
-            item["observaciones"] = f"{type(exc).__name__}: {exc}"
+        duration = time.monotonic() - started
+        log(f"{label} error | duracion={duration:.1f}s | {type(exc).__name__}: {exc}")
+        raise RuntimeError(f"{label} fallo: {type(exc).__name__}: {exc}") from exc
 
+    log(f"{label} completado en {time.monotonic() - started:.1f}s")
     return data.get("items", [])
 
 
@@ -379,9 +421,10 @@ def summarize_timeline(client, timeline, duration, model):
         "recomendaciones": [],
     }
     try:
-        response = client.responses.create(
+        summary = request_openai_json(
+            client,
             model=model,
-            input=[
+            input_payload=[
                 {
                     "role": "user",
                     "content": [
@@ -401,8 +444,9 @@ def summarize_timeline(client, timeline, duration, model):
                     ],
                 }
             ],
+            fallback=fallback,
+            label="Resumen request OpenAI",
         )
-        summary = parse_json_response(response.output_text, fallback)
         summary["tiempo_por_categoria"] = summary.get("tiempo_por_categoria") or time_by_category
         summary["porcentaje_por_categoria"] = summary.get("porcentaje_por_categoria") or percent_by_category
         return summary
@@ -497,20 +541,26 @@ def analyze_video(video_path, every_seconds=DEFAULT_EVERY_SECONDS, model=DEFAULT
     if not frames:
         raise ValueError("No se extrajeron frames.")
 
-    client = OpenAI()
+    client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS)
     raw_items = []
 
-    print("\n=== Analisis OpenAI Vision por lotes ===")
-    for batch_index, batch in enumerate(frame_batches(frames, BATCH_SIZE), start=1):
-        print(f"Lote {batch_index}: {len(batch)} frame(s)")
-        raw_items.extend(analyze_batch(client, batch, model))
+    log("\n=== Analisis OpenAI Vision por lotes ===")
+    try:
+        for batch_index, batch in enumerate(frame_batches(frames, BATCH_SIZE), start=1):
+            log(f"Lote {batch_index}: {len(batch)} frame(s)")
+            raw_items.extend(analyze_batch(client, batch, model, batch_index))
 
-    classifications = build_frame_classifications(frames, raw_items)
-    timeline = merge_similar_segments(classifications, duration)
-    summary = summarize_timeline(client, timeline, duration, model)
-    timeline_json, timeline_txt, summary_json, summary_txt = write_outputs(
-        analysis_path, timeline, summary, duration, video_path, fps, frame_count
-    )
+        classifications = build_frame_classifications(frames, raw_items)
+        timeline = merge_similar_segments(classifications, duration)
+        summary = summarize_timeline(client, timeline, duration, model)
+        timeline_json, timeline_txt, summary_json, summary_txt = write_outputs(
+            analysis_path, timeline, summary, duration, video_path, fps, frame_count
+        )
+    except Exception as exc:
+        error_message = f"{type(exc).__name__}: {exc}"
+        error_path = write_analysis_error(analysis_path, error_message)
+        log(f"ERROR de analisis registrado en: {error_path}")
+        raise
 
     return {
         "analysis_path": str(analysis_path),
