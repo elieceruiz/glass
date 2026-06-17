@@ -3,6 +3,7 @@ import json
 import os
 import time
 from datetime import datetime
+from shutil import copyfileobj
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 RECORDINGS_DIR = BASE_DIR / "glass_recordings"
 ANALYSIS_DIR = BASE_DIR / "video_analysis"
+UPLOADS_DIR = BASE_DIR / "cloud_uploads"
 GLASS_MODE = os.getenv("GLASS_MODE", "local").strip().lower() or "local"
 
 DETAIL_OPTIONS = {
@@ -606,6 +608,79 @@ def persist_successful_session(recorder, analysis_path, video_path):
         st.session_state.persistence_warning = fields["persistence_error"]
 
 
+def save_uploaded_video(uploaded_file, session_id):
+    session_dir = UPLOADS_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(uploaded_file.name).suffix or ".mp4"
+    video_path = session_dir / f"uploaded_{session_id}{suffix}"
+    uploaded_file.seek(0)
+    with video_path.open("wb") as output:
+        copyfileobj(uploaded_file, output)
+    return video_path
+
+
+def analyze_cloud_upload(uploaded_file, detail_seconds):
+    from glass_core.cloudinary_store import upload_video
+    from glass_core.db import build_analysis_document, save_analysis, save_session, update_session
+    from video_activity_analyzer import analyze_video
+
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    video_path = save_uploaded_video(uploaded_file, session_id)
+
+    cloudinary_status = "skipped"
+    cloudinary_video_url = ""
+    cloudinary_public_id = ""
+    persistence_errors = []
+
+    try:
+        upload = upload_video(video_path, session_id)
+        cloudinary_status = "success"
+        cloudinary_video_url = upload.get("secure_url", "")
+        cloudinary_public_id = upload.get("public_id", "")
+    except Exception as exc:
+        cloudinary_status = "skipped" if "Faltan credenciales" in str(exc) else "error"
+        persistence_errors.append(f"Cloudinary: {type(exc).__name__}: {exc}")
+
+    analysis = analyze_video(video_path, every_seconds=detail_seconds)
+    analysis_path = analysis["analysis_path"]
+    summary = read_json(Path(analysis_path) / "summary.json", {})
+    duration_text = clean_text(summary.get("duracion_total", "00:00:00.000"))
+    duration_seconds = timestamp_to_seconds(duration_text)
+    ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    session_doc = {
+        "session_id": session_id,
+        "fecha_inicio": started_at,
+        "fecha_fin": ended_at,
+        "duracion_segundos": round(duration_seconds, 3),
+        "duracion_hhmmss": duration_text,
+        "modo": "cloud_upload",
+        "video": str(video_path),
+        "analysis_status": "success",
+        "analysis_output_dir": analysis_path,
+        "analysis_error": "",
+        "detail_seconds": detail_seconds,
+        "mongo_status": "pending",
+        "cloudinary_status": cloudinary_status,
+        "cloudinary_video_url": cloudinary_video_url,
+        "cloudinary_public_id": cloudinary_public_id,
+        "persistence_error": " | ".join(persistence_errors),
+    }
+
+    save_session(session_doc)
+    save_analysis(session_id, build_analysis_document(session_id, analysis_path))
+    update_session(session_id, {"mongo_status": "success"})
+
+    st.session_state.active_session_id = session_id
+    st.session_state.active_video_path = str(video_path)
+    st.session_state.active_analysis_path = analysis_path
+    st.session_state.observed_seconds = duration_seconds
+    st.session_state.analysis_status = "success"
+    st.session_state.persistence_warning = session_doc["persistence_error"]
+    return session_id
+
+
 def ensure_state():
     if "stage" not in st.session_state:
         reset_flow()
@@ -629,7 +704,7 @@ def start_recording():
         st.session_state.stage = "inicio"
         st.rerun()
 
-    from glass_core import GlassRecorder
+    from glass_core.recorder import GlassRecorder
 
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     detail_seconds = st.session_state.get("active_detail_seconds") or st.session_state.get("detail_seconds", 30)
@@ -1197,6 +1272,38 @@ def render_cloud_viewer():
         "La grabación real está disponible solo en modo local. "
         "En la nube, Glass funciona como visor de reflejos."
     )
+
+    st.markdown(
+        """
+        <div class="glass-card center-card">
+            <h3 style="margin-top:0;">Analizar video</h3>
+            <p class="muted">Sube un video grabado con celular o cámara externa. Glass lo analizará sin intentar usar la cámara del servidor.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    uploaded_file = st.file_uploader(
+        "Subir video para analizar",
+        type=["mp4", "mov", "avi", "mkv", "webm"],
+        accept_multiple_files=False,
+    )
+    detail = st.select_slider(
+        "Detalle del análisis",
+        options=list(DETAIL_OPTIONS.keys()),
+        value=st.session_state.get("detail_seconds", 30),
+        format_func=lambda value: DETAIL_OPTIONS[value][0],
+    )
+    st.session_state.detail_seconds = detail
+    if uploaded_file is not None:
+        if st.button("Analizar video", use_container_width=True, type="primary"):
+            try:
+                with st.spinner("Subiendo, analizando y guardando reflejo..."):
+                    analyze_cloud_upload(uploaded_file, detail)
+                st.success("Reflejo generado.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No pude analizar el video: {type(exc).__name__}: {exc}")
+
     if not sessions:
         st.warning("Aún no hay sesiones persistidas disponibles en MongoDB.")
         return

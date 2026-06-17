@@ -13,11 +13,19 @@ import threading
 import time
 from typing import Callable
 
-import cv2
-
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 CAMERA_INDEXES = range(6)
+cv2 = None
+
+
+def require_cv2():
+    global cv2
+    if cv2 is None:
+        import cv2 as cv2_module
+
+        cv2 = cv2_module
+    return cv2
 
 
 @dataclass
@@ -121,6 +129,7 @@ class GlassRecorder:
         if self.is_running:
             return
 
+        require_cv2()
         self.session_dir.mkdir(parents=True, exist_ok=True)
         if self.enable_snapshots:
             self.snapshots_dir.mkdir(parents=True, exist_ok=True)

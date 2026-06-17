@@ -1,5 +1,7 @@
-"""Core reutilizable de Glass."""
+"""Core reutilizable de Glass.
 
-from .recorder import GlassRecorder, RecordingResult
+No importes recorder aqui: recorder carga OpenCV y en modo cloud no debe
+intentarse cargar cv2/libGL.
+"""
 
-__all__ = ["GlassRecorder", "RecordingResult"]
+__all__ = []

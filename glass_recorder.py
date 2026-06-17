@@ -14,7 +14,7 @@ except ModuleNotFoundError:
     print("Falta opencv-python. Ejecuta: python -m pip install opencv-python")
     sys.exit(1)
 
-from glass_core import GlassRecorder
+from glass_core.recorder import GlassRecorder
 
 
 FRAME_WIDTH = 640
