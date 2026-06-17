@@ -5,6 +5,7 @@ __pycache__/
 archive/
 glass_recordings/
 video_analysis/
+cloud_uploads/
 finger_sessions/
 finger_recordings_archive/
 archive/experiments/*/finger_sessions/

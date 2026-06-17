@@ -14,7 +14,6 @@ import re
 import sys
 import time
 
-import cv2
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 
@@ -26,6 +25,16 @@ DEFAULT_EVERY_SECONDS = 120
 BATCH_SIZE = 6
 JPEG_QUALITY = 90
 OPENAI_TIMEOUT_SECONDS = 180
+cv2 = None
+
+
+def require_cv2():
+    global cv2
+    if cv2 is None:
+        import cv2 as cv2_module
+
+        cv2 = cv2_module
+    return cv2
 
 
 def log(message):
@@ -122,6 +131,7 @@ def read_video_info(capture):
 
 
 def extract_frames(video_path, every_seconds):
+    require_cv2()
     analysis_path, frames_path = create_analysis_dirs()
     capture = open_video(video_path)
     fps, frame_count, duration = read_video_info(capture)
