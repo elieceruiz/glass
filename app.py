@@ -1140,7 +1140,9 @@ def event_text(event):
 
 
 def render_narrative(summary, timeline):
-    events = timeline[:4] if timeline else summary_list(summary, "eventos_principales")
+    timeline_events = list(timeline or [])
+    events = timeline_events if timeline_events else summary_list(summary, "eventos_principales")
+    rendered_events = len(events)
     st.markdown(
         f"""
         <div class="glass-card">
@@ -1153,18 +1155,26 @@ def render_narrative(summary, timeline):
 
     if events:
         st.write("")
-        for event in events[:4]:
-            title, description, time_range = event_text(event)
-            st.markdown(
-                f"""
-                <div class="chapter">
-                    <div class="chapter-time">{time_range}</div>
-                    <div class="chapter-title">{title}</div>
-                    <div class="muted">{description}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        st.caption(f"timeline_length={len(timeline_events)} · rendered_events={rendered_events}")
+
+        event_container = st.expander(
+            f"Mostrar timeline completo ({rendered_events} eventos)",
+            expanded=rendered_events <= 20,
+        ) if rendered_events > 20 else st.container()
+
+        with event_container:
+            for event in events:
+                title, description, time_range = event_text(event)
+                st.markdown(
+                    f"""
+                    <div class="chapter">
+                        <div class="chapter-time">{time_range}</div>
+                        <div class="chapter-title">{title}</div>
+                        <div class="muted">{description}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 
 def render_recorder_cta():
