@@ -3,9 +3,8 @@ import json
 import os
 import re
 import time
+import traceback
 from datetime import datetime
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -661,137 +660,6 @@ def load_existing_cloud_reflection(session_id):
     return None
 
 
-def download_cloudinary_video(video_url, session_id):
-    parsed = urlparse(video_url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("video_url debe ser una URL http/https valida.")
-
-    safe_id = safe_session_id(session_id)
-    if not safe_id:
-        raise ValueError("session_id invalido.")
-
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = Path(parsed.path).suffix or ".webm"
-    if suffix.lower() not in {".webm", ".mp4", ".mov", ".mkv", ".avi"}:
-        suffix = ".webm"
-    video_path = UPLOADS_DIR / f"{safe_id}{suffix}"
-
-    request = Request(video_url, headers={"User-Agent": "Glass/1.0"})
-    app_log(f"Descargando video Vercel/Cloudinary: {video_url}")
-    with urlopen(request, timeout=180) as response, video_path.open("wb") as output:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-
-    if video_path.stat().st_size <= 0:
-        raise ValueError("La descarga del video quedo vacia.")
-    app_log(f"Video descargado: {video_path} ({video_path.stat().st_size} bytes)")
-    return video_path
-
-
-def analyze_vercel_session(session_id, public_id, video_url, detail_seconds):
-    from glass_core.db import build_analysis_document, save_analysis, save_session, update_session
-    from video_activity_analyzer import analyze_video
-
-    safe_id = safe_session_id(session_id)
-    if not safe_id:
-        raise ValueError("Falta session_id valido.")
-    if not public_id:
-        raise ValueError("Falta public_id.")
-    if not video_url:
-        raise ValueError("Falta video_url.")
-
-    existing = load_existing_cloud_reflection(safe_id)
-    if existing:
-        st.session_state.cloud_active_reflection = existing
-        st.session_state.active_session_id = safe_id
-        st.session_state.analysis_status = "success"
-        st.session_state.active_analysis_path = existing.get("analysis", {}).get("path", "")
-        st.session_state.active_video_path = existing.get("metadata", {}).get("cloudinary_video_url", video_url)
-        st.session_state.observed_seconds = timestamp_to_seconds(
-            existing.get("metadata", {}).get("duracion_hhmmss", "00:00:00.000")
-        )
-        app_log(f"Sesion Vercel ya analizada en MongoDB: {safe_id}")
-        return existing
-
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    video_path = download_cloudinary_video(video_url, safe_id)
-
-    try:
-        app_log(f"Analizando sesion Vercel {safe_id} con detalle {detail_seconds}s")
-        analysis = analyze_video(video_path, every_seconds=detail_seconds)
-    except Exception as exc:
-        error_message = f"{type(exc).__name__}: {exc}"
-        error_path = UPLOADS_DIR / f"{safe_id}_analysis_error.txt"
-        error_path.write_text(error_message + "\n", encoding="utf-8")
-        st.session_state.analysis_status = "error"
-        st.session_state.analysis_error = error_message
-        st.session_state.active_session_id = safe_id
-        st.session_state.active_video_path = str(video_path)
-        st.session_state.active_analysis_path = str(error_path)
-        app_log(f"Analisis Vercel fallo: {error_message}")
-        raise
-
-    analysis_path = analysis["analysis_path"]
-    summary = read_json(Path(analysis_path) / "summary.json", {})
-    duration_text = clean_text(summary.get("duracion_total", "00:00:00.000"))
-    duration_seconds = timestamp_to_seconds(duration_text)
-    ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    session_doc = {
-        "session_id": safe_id,
-        "fecha_inicio": started_at,
-        "fecha_fin": ended_at,
-        "duracion_segundos": round(duration_seconds, 3),
-        "duracion_hhmmss": duration_text,
-        "modo": "cloud_vercel",
-        "source": "vercel",
-        "video": str(video_path),
-        "analysis_status": "success",
-        "analysis_output_dir": analysis_path,
-        "analysis_error": "",
-        "detail_seconds": detail_seconds,
-        "mongo_status": "pending",
-        "cloudinary_status": "success",
-        "cloudinary_video_url": video_url,
-        "cloudinary_public_id": public_id,
-        "persistence_error": "",
-    }
-
-    persistence_error = ""
-    try:
-        save_session(session_doc)
-        save_analysis(safe_id, build_analysis_document(safe_id, analysis_path))
-        update_session(safe_id, {"mongo_status": "success"})
-    except Exception as exc:
-        persistence_error = f"MongoDB: {type(exc).__name__}: {exc}"
-        session_doc["mongo_status"] = "error"
-        session_doc["persistence_error"] = persistence_error
-        app_log(f"MongoDB no pudo guardar sesion Vercel: {persistence_error}")
-    else:
-        session_doc["mongo_status"] = "success"
-
-    reflection = {
-        "id": safe_id,
-        "path": str(video_path),
-        "source": "cloud_vercel",
-        "metadata": session_doc,
-        "analysis": load_analysis(analysis_path),
-        "mtime": time.time(),
-    }
-    st.session_state.cloud_active_reflection = reflection
-    st.session_state.active_session_id = safe_id
-    st.session_state.active_video_path = str(video_path)
-    st.session_state.active_analysis_path = analysis_path
-    st.session_state.observed_seconds = duration_seconds
-    st.session_state.analysis_status = "success"
-    st.session_state.persistence_warning = persistence_error
-    app_log(f"Reflejo Vercel listo: {safe_id} -> {analysis_path}")
-    return reflection
-
-
 def ensure_state():
     if "stage" not in st.session_state:
         reset_flow()
@@ -912,14 +780,17 @@ def selected_detail():
     return value, label, description
 
 
-def write_session_analysis_error(message):
+def write_session_analysis_error(message, full_traceback=""):
     session_id = st.session_state.get("active_session_id")
     if not session_id:
         return None
     session_dir = RECORDINGS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     error_path = session_dir / "analysis_error.txt"
-    error_path.write_text(str(message).strip() + "\n", encoding="utf-8")
+    body = str(message).strip() + "\n"
+    if full_traceback:
+        body += "\n" + full_traceback
+    error_path.write_text(body, encoding="utf-8")
     return error_path
 
 
@@ -957,10 +828,13 @@ def run_current_analysis():
 
     try:
         app_log(f"Ejecutando análisis con detalle: {detail_seconds}s")
+        app_log("DEBUG app: antes de analyze_video() en flujo local.")
         analysis = analyze_video(video_path, every_seconds=detail_seconds)
+        app_log("DEBUG app: analyze_video() completado en flujo local.")
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
-        error_path = write_session_analysis_error(message)
+        full_traceback = traceback.format_exc()
+        error_path = write_session_analysis_error(message, full_traceback)
         st.session_state.analysis_status = "error"
         st.session_state.analysis_error = message
         st.session_state.active_analysis_path = str(error_path) if error_path else "error"
@@ -977,6 +851,7 @@ def run_current_analysis():
             except Exception:
                 pass
         app_log(f"Análisis falló: {message}")
+        app_log(full_traceback)
         return False
 
     analysis_path = analysis["analysis_path"]
@@ -1383,26 +1258,27 @@ def render_cloud_viewer():
         "En la nube, Glass funciona como visor de reflejos."
     )
 
-    source = query_param("source")
     session_id = safe_session_id(query_param("session_id"))
-    public_id = query_param("public_id")
-    video_url = query_param("video_url")
-    detail = st.session_state.get("detail_seconds", 30)
 
-    if source == "vercel":
-        if not session_id or not public_id or not video_url:
-            st.error(
-                "Faltan datos para generar el reflejo. "
-                "La URL debe incluir source=vercel, session_id, public_id y video_url."
+    if session_id:
+        reflection = load_existing_cloud_reflection(session_id)
+        if reflection:
+            st.session_state.cloud_active_reflection = reflection
+            st.session_state.active_session_id = session_id
+            st.session_state.analysis_status = "success"
+            st.session_state.active_analysis_path = reflection.get("analysis", {}).get("path", "")
+            st.session_state.active_video_path = reflection.get("metadata", {}).get("cloudinary_video_url", "")
+            st.session_state.observed_seconds = timestamp_to_seconds(
+                reflection.get("metadata", {}).get("duracion_hhmmss", "00:00:00.000")
             )
+            render_result()
+            return
         else:
-            try:
-                with st.spinner("Video recibido. Generando reflejo..."):
-                    analyze_vercel_session(session_id, public_id, video_url, detail)
-                render_result()
-                return
-            except Exception as exc:
-                st.error(f"No pude generar el reflejo: {type(exc).__name__}: {exc}")
+            st.warning(
+                "Ese reflejo todavía no está disponible en MongoDB. "
+                "Si acabas de grabar, espera a que glass-api termine el análisis y actualiza esta página."
+            )
+            return
 
     st.markdown(
         f"""
