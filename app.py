@@ -18,6 +18,7 @@ ANALYSIS_DIR = BASE_DIR / "video_analysis"
 UPLOADS_DIR = BASE_DIR / "cloud_uploads"
 GLASS_MODE = os.getenv("GLASS_MODE", "local").strip().lower() or "local"
 GLASS_RECORDER_WEB_URL = os.getenv("GLASS_RECORDER_WEB_URL", "https://glass-recorder-web.vercel.app").strip()
+GLASS_DEBUG = os.getenv("GLASS_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 DETAIL_OPTIONS = {
     10: ("Muy detallado", "más puntos de observación, lectura más fina"),
@@ -466,6 +467,20 @@ def css():
             display: block;
             font-size: 1.38rem;
             line-height: 1.1;
+        }
+        .metric-label {
+            display: block;
+            white-space: nowrap;
+            overflow-wrap: normal;
+            word-break: keep-all;
+        }
+        @media (max-width: 700px) {
+            .metric-row {
+                grid-template-columns: 1fr;
+            }
+            .soft-metric {
+                padding: 0.9rem 1rem;
+            }
         }
         .chapter {
             border-left: 3px solid #7dd3fc;
@@ -1200,9 +1215,9 @@ def render_result(show_brand=True, show_cloud_cta=True):
             '<div class="subtitle">Así se fue tu tiempo.</div>'
             "</section>"
             '<div class="metric-row">'
-            f'<div class="soft-metric"><span class="muted">Duración observada</span><b>{duration}</b></div>'
-            f'<div class="soft-metric"><span class="muted">Momentos principales</span><b>{len(timeline)}</b></div>'
-            f'<div class="soft-metric"><span class="muted">Lectura</span><b>{"lista" if timeline else "pendiente"}</b></div>'
+            f'<div class="soft-metric"><span class="muted metric-label">Duración</span><b>{duration}</b></div>'
+            f'<div class="soft-metric"><span class="muted metric-label">Momentos</span><b>{len(timeline)}</b></div>'
+            f'<div class="soft-metric"><span class="muted metric-label">Lectura</span><b>{"lista" if timeline else "pendiente"}</b></div>'
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -1234,12 +1249,20 @@ def render_result(show_brand=True, show_cloud_cta=True):
     if persistence_error:
         st.warning(f"Persistencia remota incompleta: {persistence_error}")
 
-    with st.expander("Trazabilidad de este reflejo", expanded=not bool(timeline)):
-        st.write(f"Sesión: `{trace['session_id']}`")
-        st.write(f"Detalle: `{trace['detail']}`")
-        st.write(f"Video: `{trace['recording']}`")
-        st.write(f"Análisis: `{trace['analysis']}`")
-        st.write(f"Estado: `{trace['status']}`")
+    if GLASS_DEBUG or GLASS_MODE == "local":
+        st.markdown(
+            f"""
+            <div class="glass-card">
+                <h3 style="margin-top:0;">Trazabilidad de este reflejo</h3>
+                <div><b>Sesión:</b> {trace['session_id']}</div>
+                <div><b>Detalle:</b> {trace['detail']}</div>
+                <div><b>Video:</b> {trace['recording']}</div>
+                <div><b>Análisis:</b> {trace['analysis']}</div>
+                <div><b>Estado:</b> {trace['status']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.write("")
     st.markdown("### Categorías detectadas")
