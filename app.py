@@ -1,9 +1,11 @@
 from pathlib import Path
 import json
 import os
+import re
 import time
 from datetime import datetime
-from shutil import copyfileobj
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -16,6 +18,7 @@ RECORDINGS_DIR = BASE_DIR / "glass_recordings"
 ANALYSIS_DIR = BASE_DIR / "video_analysis"
 UPLOADS_DIR = BASE_DIR / "cloud_uploads"
 GLASS_MODE = os.getenv("GLASS_MODE", "local").strip().lower() or "local"
+GLASS_RECORDER_WEB_URL = os.getenv("GLASS_RECORDER_WEB_URL", "https://glass-recorder-web.vercel.app").strip()
 
 DETAIL_OPTIONS = {
     10: ("Muy detallado", "más puntos de observación, lectura más fina"),
@@ -183,8 +186,12 @@ def active_session_reflection():
     if not active_id:
         return None
 
+    cloud_reflection = st.session_state.get("cloud_active_reflection")
+    if GLASS_MODE == "cloud" and cloud_reflection and cloud_reflection.get("id") == active_id:
+        return cloud_reflection
+
     for session in load_sessions():
-        if session.get("source") != "recording":
+        if GLASS_MODE != "cloud" and session.get("source") != "recording":
             continue
         if session.get("id") == active_id:
             return session
@@ -504,6 +511,7 @@ def reset_flow():
     st.session_state.stop_in_progress = False
     st.session_state.stop_completed = False
     st.session_state.persistence_warning = ""
+    st.session_state.cloud_active_reflection = None
 
 
 def app_log(message):
@@ -608,41 +616,124 @@ def persist_successful_session(recorder, analysis_path, video_path):
         st.session_state.persistence_warning = fields["persistence_error"]
 
 
-def save_uploaded_video(uploaded_file, session_id):
-    session_dir = UPLOADS_DIR / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(uploaded_file.name).suffix or ".mp4"
-    video_path = session_dir / f"uploaded_{session_id}{suffix}"
-    uploaded_file.seek(0)
-    with video_path.open("wb") as output:
-        copyfileobj(uploaded_file, output)
+def safe_session_id(session_id):
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", str(session_id or "").strip())
+    return cleaned.strip("-")[:80]
+
+
+def query_param(name):
+    value = st.query_params.get(name)
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    return str(value or "").strip()
+
+
+def cloud_reflection_from_docs(session_doc, analysis_doc):
+    session_id = str(session_doc.get("session_id") or analysis_doc.get("session_id") or "")
+    return {
+        "id": session_id,
+        "path": session_doc.get("session_dir") or session_doc.get("metadata_path") or "",
+        "source": "mongo",
+        "metadata": session_doc,
+        "analysis": {
+            "path": analysis_doc.get("analysis_path", ""),
+            "timeline": analysis_doc.get("timeline", []),
+            "summary": analysis_doc.get("summary", {}),
+        },
+        "mtime": timestamp_to_seconds(session_doc.get("duracion_hhmmss", "00:00:00.000")),
+    }
+
+
+def load_existing_cloud_reflection(session_id):
+    try:
+        from glass_core.db import get_analysis, get_session
+
+        session_doc = get_session(session_id) or {}
+        analysis_doc = get_analysis(session_id) or {}
+    except Exception as exc:
+        app_log(f"No pude consultar MongoDB para evitar reproceso: {type(exc).__name__}: {exc}")
+        return None
+
+    timeline = analysis_doc.get("timeline") or []
+    summary = analysis_doc.get("summary") or {}
+    if session_doc and timeline and summary and session_doc.get("analysis_status") == "success":
+        return cloud_reflection_from_docs(session_doc, analysis_doc)
+    return None
+
+
+def download_cloudinary_video(video_url, session_id):
+    parsed = urlparse(video_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("video_url debe ser una URL http/https valida.")
+
+    safe_id = safe_session_id(session_id)
+    if not safe_id:
+        raise ValueError("session_id invalido.")
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(parsed.path).suffix or ".webm"
+    if suffix.lower() not in {".webm", ".mp4", ".mov", ".mkv", ".avi"}:
+        suffix = ".webm"
+    video_path = UPLOADS_DIR / f"{safe_id}{suffix}"
+
+    request = Request(video_url, headers={"User-Agent": "Glass/1.0"})
+    app_log(f"Descargando video Vercel/Cloudinary: {video_url}")
+    with urlopen(request, timeout=180) as response, video_path.open("wb") as output:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+
+    if video_path.stat().st_size <= 0:
+        raise ValueError("La descarga del video quedo vacia.")
+    app_log(f"Video descargado: {video_path} ({video_path.stat().st_size} bytes)")
     return video_path
 
 
-def analyze_cloud_upload(uploaded_file, detail_seconds):
-    from glass_core.cloudinary_store import upload_video
+def analyze_vercel_session(session_id, public_id, video_url, detail_seconds):
     from glass_core.db import build_analysis_document, save_analysis, save_session, update_session
     from video_activity_analyzer import analyze_video
 
-    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    video_path = save_uploaded_video(uploaded_file, session_id)
+    safe_id = safe_session_id(session_id)
+    if not safe_id:
+        raise ValueError("Falta session_id valido.")
+    if not public_id:
+        raise ValueError("Falta public_id.")
+    if not video_url:
+        raise ValueError("Falta video_url.")
 
-    cloudinary_status = "skipped"
-    cloudinary_video_url = ""
-    cloudinary_public_id = ""
-    persistence_errors = []
+    existing = load_existing_cloud_reflection(safe_id)
+    if existing:
+        st.session_state.cloud_active_reflection = existing
+        st.session_state.active_session_id = safe_id
+        st.session_state.analysis_status = "success"
+        st.session_state.active_analysis_path = existing.get("analysis", {}).get("path", "")
+        st.session_state.active_video_path = existing.get("metadata", {}).get("cloudinary_video_url", video_url)
+        st.session_state.observed_seconds = timestamp_to_seconds(
+            existing.get("metadata", {}).get("duracion_hhmmss", "00:00:00.000")
+        )
+        app_log(f"Sesion Vercel ya analizada en MongoDB: {safe_id}")
+        return existing
+
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    video_path = download_cloudinary_video(video_url, safe_id)
 
     try:
-        upload = upload_video(video_path, session_id)
-        cloudinary_status = "success"
-        cloudinary_video_url = upload.get("secure_url", "")
-        cloudinary_public_id = upload.get("public_id", "")
+        app_log(f"Analizando sesion Vercel {safe_id} con detalle {detail_seconds}s")
+        analysis = analyze_video(video_path, every_seconds=detail_seconds)
     except Exception as exc:
-        cloudinary_status = "skipped" if "Faltan credenciales" in str(exc) else "error"
-        persistence_errors.append(f"Cloudinary: {type(exc).__name__}: {exc}")
+        error_message = f"{type(exc).__name__}: {exc}"
+        error_path = UPLOADS_DIR / f"{safe_id}_analysis_error.txt"
+        error_path.write_text(error_message + "\n", encoding="utf-8")
+        st.session_state.analysis_status = "error"
+        st.session_state.analysis_error = error_message
+        st.session_state.active_session_id = safe_id
+        st.session_state.active_video_path = str(video_path)
+        st.session_state.active_analysis_path = str(error_path)
+        app_log(f"Analisis Vercel fallo: {error_message}")
+        raise
 
-    analysis = analyze_video(video_path, every_seconds=detail_seconds)
     analysis_path = analysis["analysis_path"]
     summary = read_json(Path(analysis_path) / "summary.json", {})
     duration_text = clean_text(summary.get("duracion_total", "00:00:00.000"))
@@ -650,35 +741,55 @@ def analyze_cloud_upload(uploaded_file, detail_seconds):
     ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     session_doc = {
-        "session_id": session_id,
+        "session_id": safe_id,
         "fecha_inicio": started_at,
         "fecha_fin": ended_at,
         "duracion_segundos": round(duration_seconds, 3),
         "duracion_hhmmss": duration_text,
-        "modo": "cloud_upload",
+        "modo": "cloud_vercel",
+        "source": "vercel",
         "video": str(video_path),
         "analysis_status": "success",
         "analysis_output_dir": analysis_path,
         "analysis_error": "",
         "detail_seconds": detail_seconds,
         "mongo_status": "pending",
-        "cloudinary_status": cloudinary_status,
-        "cloudinary_video_url": cloudinary_video_url,
-        "cloudinary_public_id": cloudinary_public_id,
-        "persistence_error": " | ".join(persistence_errors),
+        "cloudinary_status": "success",
+        "cloudinary_video_url": video_url,
+        "cloudinary_public_id": public_id,
+        "persistence_error": "",
     }
 
-    save_session(session_doc)
-    save_analysis(session_id, build_analysis_document(session_id, analysis_path))
-    update_session(session_id, {"mongo_status": "success"})
+    persistence_error = ""
+    try:
+        save_session(session_doc)
+        save_analysis(safe_id, build_analysis_document(safe_id, analysis_path))
+        update_session(safe_id, {"mongo_status": "success"})
+    except Exception as exc:
+        persistence_error = f"MongoDB: {type(exc).__name__}: {exc}"
+        session_doc["mongo_status"] = "error"
+        session_doc["persistence_error"] = persistence_error
+        app_log(f"MongoDB no pudo guardar sesion Vercel: {persistence_error}")
+    else:
+        session_doc["mongo_status"] = "success"
 
-    st.session_state.active_session_id = session_id
+    reflection = {
+        "id": safe_id,
+        "path": str(video_path),
+        "source": "cloud_vercel",
+        "metadata": session_doc,
+        "analysis": load_analysis(analysis_path),
+        "mtime": time.time(),
+    }
+    st.session_state.cloud_active_reflection = reflection
+    st.session_state.active_session_id = safe_id
     st.session_state.active_video_path = str(video_path)
     st.session_state.active_analysis_path = analysis_path
     st.session_state.observed_seconds = duration_seconds
     st.session_state.analysis_status = "success"
-    st.session_state.persistence_warning = session_doc["persistence_error"]
-    return session_id
+    st.session_state.persistence_warning = persistence_error
+    app_log(f"Reflejo Vercel listo: {safe_id} -> {analysis_path}")
+    return reflection
 
 
 def ensure_state():
@@ -1257,7 +1368,6 @@ def render_result():
 
 
 def render_cloud_viewer():
-    sessions = load_sessions()
     st.markdown(
         """
         <section style="text-align:center; padding:2rem 0 1.2rem;">
@@ -1273,37 +1383,41 @@ def render_cloud_viewer():
         "En la nube, Glass funciona como visor de reflejos."
     )
 
+    source = query_param("source")
+    session_id = safe_session_id(query_param("session_id"))
+    public_id = query_param("public_id")
+    video_url = query_param("video_url")
+    detail = st.session_state.get("detail_seconds", 30)
+
+    if source == "vercel":
+        if not session_id or not public_id or not video_url:
+            st.error(
+                "Faltan datos para generar el reflejo. "
+                "La URL debe incluir source=vercel, session_id, public_id y video_url."
+            )
+        else:
+            try:
+                with st.spinner("Video recibido. Generando reflejo..."):
+                    analyze_vercel_session(session_id, public_id, video_url, detail)
+                render_result()
+                return
+            except Exception as exc:
+                st.error(f"No pude generar el reflejo: {type(exc).__name__}: {exc}")
+
     st.markdown(
-        """
+        f"""
         <div class="glass-card center-card">
-            <h3 style="margin-top:0;">Analizar video</h3>
-            <p class="muted">Sube un video grabado con celular o cámara externa. Glass lo analizará sin intentar usar la cámara del servidor.</p>
+            <h3 style="margin-top:0;">Graba desde Glass Recorder Web</h3>
+            <p class="muted">Usa el grabador web para capturar desde celular o navegador. El video sube directo a Cloudinary y vuelve a Glass para generar tu reflejo.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    uploaded_file = st.file_uploader(
-        "Subir video para analizar",
-        type=["mp4", "mov", "avi", "mkv", "webm"],
-        accept_multiple_files=False,
-    )
-    detail = st.select_slider(
-        "Detalle del análisis",
-        options=list(DETAIL_OPTIONS.keys()),
-        value=st.session_state.get("detail_seconds", 30),
-        format_func=lambda value: DETAIL_OPTIONS[value][0],
-    )
-    st.session_state.detail_seconds = detail
-    if uploaded_file is not None:
-        if st.button("Analizar video", use_container_width=True, type="primary"):
-            try:
-                with st.spinner("Subiendo, analizando y guardando reflejo..."):
-                    analyze_cloud_upload(uploaded_file, detail)
-                st.success("Reflejo generado.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"No pude analizar el video: {type(exc).__name__}: {exc}")
+    st.markdown('<div class="primary">', unsafe_allow_html=True)
+    st.link_button("Abrir grabador", GLASS_RECORDER_WEB_URL, use_container_width=True, type="primary")
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    sessions = load_sessions()
     if not sessions:
         st.warning("Aún no hay sesiones persistidas disponibles en MongoDB.")
         return
