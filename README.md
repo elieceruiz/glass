@@ -52,6 +52,7 @@ pip install -r requirements.txt
 Crea un archivo `.env` local:
 
 ```text
+GLASS_MODE=local
 OPENAI_API_KEY=tu_clave
 MONGO_URI=tu_uri_mongodb
 CLOUDINARY_CLOUD_NAME=tu_cloud_name
@@ -60,6 +61,26 @@ CLOUDINARY_API_SECRET=tu_api_secret
 ```
 
 No subas `.env` a GitHub. MongoDB y Cloudinary son opcionales en esta fase: si faltan credenciales, Glass mantiene el flujo local y marca la persistencia remota como omitida.
+
+## Modos De Ejecucion
+
+Glass tiene dos modos:
+
+- `GLASS_MODE=local`: grabador real. Usa OpenCV en el computador local, analiza el video, guarda archivos locales, espeja datos en MongoDB y sube el video a Cloudinary si hay credenciales.
+- `GLASS_MODE=cloud`: visor. No intenta abrir camara ni usar OpenCV para grabar. Carga sesiones persistidas desde MongoDB y muestra videos desde Cloudinary si existen.
+
+En Streamlit Community Cloud configura estos secrets desde el panel, no con `.env`:
+
+```text
+GLASS_MODE=cloud
+OPENAI_API_KEY=...
+MONGO_URI=...
+CLOUDINARY_CLOUD_NAME=...
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+```
+
+La grabacion real con OpenCV solo funciona en modo local. En la nube, OpenCV correria en el servidor de Streamlit, no en el computador del usuario, por eso Glass Cloud funciona como visor de reflejos.
 
 ## Interfaz Glass
 

@@ -15,3 +15,11 @@ archive/experiments/*/finger_sessions/
 *.mkv
 *.webm
 *.task
+
+streamlit-mode-local.err.log
+streamlit-mode-local.out.log
+streamlit-mode-local.pid
+
+*.pid
+*.out.log
+*.err.log

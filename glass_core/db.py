@@ -157,6 +157,25 @@ def get_analysis(session_id: str) -> dict[str, Any] | None:
     return db[ANALYSIS_COLLECTION].find_one({"session_id": session_id}, {"_id": False})
 
 
+def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
+    db = get_database()
+    cursor = (
+        db[SESSION_COLLECTION]
+        .find({}, {"_id": False})
+        .sort([("fecha_inicio", -1), ("updated_at", -1)])
+        .limit(limit)
+    )
+    return list(cursor)
+
+
+def list_analysis_for_sessions(session_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not session_ids:
+        return {}
+    db = get_database()
+    cursor = db[ANALYSIS_COLLECTION].find({"session_id": {"$in": session_ids}}, {"_id": False})
+    return {item.get("session_id", ""): item for item in cursor}
+
+
 def build_session_document(metadata_path: Path | str) -> dict[str, Any]:
     metadata_path = Path(metadata_path)
     metadata = load_json(metadata_path, {})

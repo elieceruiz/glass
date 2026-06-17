@@ -1,17 +1,19 @@
 from pathlib import Path
 import json
+import os
 import time
 from datetime import datetime
 
 import streamlit as st
+from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
-
-from glass_core import GlassRecorder
 
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 RECORDINGS_DIR = BASE_DIR / "glass_recordings"
 ANALYSIS_DIR = BASE_DIR / "video_analysis"
+GLASS_MODE = os.getenv("GLASS_MODE", "local").strip().lower() or "local"
 
 DETAIL_OPTIONS = {
     10: ("Muy detallado", "más puntos de observación, lectura más fina"),
@@ -95,7 +97,41 @@ def load_analysis(path):
     }
 
 
+def load_cloud_sessions():
+    try:
+        from glass_core.db import list_analysis_for_sessions, list_sessions
+
+        metadata_items = list_sessions(limit=20)
+        analysis_by_session = list_analysis_for_sessions([
+            str(item.get("session_id", "")) for item in metadata_items if item.get("session_id")
+        ])
+    except Exception as exc:
+        st.warning(f"No pude cargar sesiones desde MongoDB: {type(exc).__name__}: {exc}")
+        return []
+
+    sessions = []
+    for item in metadata_items:
+        session_id = str(item.get("session_id") or "")
+        analysis_doc = analysis_by_session.get(session_id, {})
+        sessions.append({
+            "id": session_id,
+            "path": item.get("session_dir") or item.get("metadata_path") or "",
+            "source": "mongo",
+            "metadata": item,
+            "analysis": {
+                "path": analysis_doc.get("analysis_path", ""),
+                "timeline": analysis_doc.get("timeline", []),
+                "summary": analysis_doc.get("summary", {}),
+            },
+            "mtime": timestamp_to_seconds(item.get("duracion_hhmmss", "00:00:00.000")),
+        })
+    return sessions
+
+
 def load_sessions():
+    if GLASS_MODE == "cloud":
+        return load_cloud_sessions()
+
     sessions = []
     known_paths = set()
 
@@ -585,6 +621,16 @@ def start_countdown():
 
 
 def start_recording():
+    if GLASS_MODE == "cloud":
+        st.session_state.analysis_error = (
+            "La grabación real está disponible solo en modo local. "
+            "En la nube, Glass funciona como visor de reflejos."
+        )
+        st.session_state.stage = "inicio"
+        st.rerun()
+
+    from glass_core import GlassRecorder
+
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     detail_seconds = st.session_state.get("active_detail_seconds") or st.session_state.get("detail_seconds", 30)
     recorder = GlassRecorder(
@@ -812,6 +858,10 @@ def timeline_html(timeline):
 
 
 def render_start():
+    if GLASS_MODE == "cloud":
+        render_cloud_viewer()
+        return
+
     st.markdown(
         """
         <section class="screen">
@@ -1059,6 +1109,8 @@ def render_narrative(summary, timeline):
 
 def render_result():
     reflection = active_session_reflection()
+    if reflection is None and GLASS_MODE == "cloud":
+        reflection = latest_reflection()
     summary = reflection.get("analysis", {}).get("summary", {}) if reflection else {}
     timeline = reflection.get("analysis", {}).get("timeline", []) if reflection else []
     duration = seconds_to_timestamp(st.session_state.observed_seconds)
@@ -1099,6 +1151,11 @@ def render_result():
                 st.rerun()
 
     metadata = reflection.get("metadata", {}) if reflection else {}
+    cloudinary_url = metadata.get("cloudinary_video_url", "")
+    if cloudinary_url:
+        st.write("")
+        st.video(cloudinary_url)
+
     persistence_error = st.session_state.get("persistence_warning") or metadata.get("persistence_error", "")
     if persistence_error:
         st.warning(f"Persistencia remota incompleta: {persistence_error}")
@@ -1118,14 +1175,43 @@ def render_result():
     render_narrative(summary, timeline)
 
     st.write("")
-    if st.button("Iniciar otra sesión", use_container_width=True, type="primary"):
+    next_label = "Actualizar reflejos" if GLASS_MODE == "cloud" else "Iniciar otra sesión"
+    if st.button(next_label, use_container_width=True, type="primary"):
         reset_flow()
         st.rerun()
+
+
+def render_cloud_viewer():
+    sessions = load_sessions()
+    st.markdown(
+        """
+        <section style="text-align:center; padding:2rem 0 1.2rem;">
+            <div class="brand">Glass</div>
+            <h1 class="title">Glass</h1>
+            <div class="subtitle">Visor de reflejos persistidos</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "La grabación real está disponible solo en modo local. "
+        "En la nube, Glass funciona como visor de reflejos."
+    )
+    if not sessions:
+        st.warning("Aún no hay sesiones persistidas disponibles en MongoDB.")
+        return
+
+    st.session_state.active_session_id = sessions[0]["id"]
+    render_result()
 
 
 def main():
     ensure_state()
     css()
+
+    if GLASS_MODE == "cloud":
+        render_cloud_viewer()
+        return
 
     if st.session_state.stage == "inicio":
         render_start()
