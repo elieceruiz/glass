@@ -677,8 +677,7 @@ def start_countdown():
 def start_recording():
     if GLASS_MODE == "cloud":
         st.session_state.analysis_error = (
-            "La grabación real está disponible solo en modo local. "
-            "En la nube, Glass funciona como visor de reflejos."
+            "En cloud, la captura empieza desde Glass Recorder Web."
         )
         st.session_state.stage = "inicio"
         st.rerun()
@@ -1168,7 +1167,19 @@ def render_narrative(summary, timeline):
             )
 
 
-def render_result():
+def render_recorder_cta():
+    if GLASS_RECORDER_WEB_URL:
+        st.link_button(
+            "Grabar nuevo reflejo",
+            GLASS_RECORDER_WEB_URL,
+            use_container_width=True,
+            type="primary",
+        )
+    else:
+        st.warning("No hay URL configurada para Glass Recorder Web.")
+
+
+def render_result(show_brand=True, show_cloud_cta=True):
     reflection = active_session_reflection()
     if reflection is None and GLASS_MODE == "cloud":
         reflection = latest_reflection()
@@ -1179,10 +1190,11 @@ def render_result():
         duration = session_duration(reflection)
     trace = traceability(reflection)
 
+    brand_html = '<div class="brand">Glass</div>' if show_brand else ""
     st.markdown(
         f"""
         <section style="text-align:center; padding:2rem 0 1.2rem;">
-            <div class="brand">Glass</div>
+            {brand_html}
             <h1 class="title">Tu Reflejo</h1>
             <div class="subtitle">Así se fue tu tiempo.</div>
         </section>
@@ -1236,8 +1248,10 @@ def render_result():
     render_narrative(summary, timeline)
 
     st.write("")
-    next_label = "Actualizar reflejos" if GLASS_MODE == "cloud" else "Iniciar otra sesión"
-    if st.button(next_label, use_container_width=True, type="primary"):
+    if GLASS_MODE == "cloud":
+        if show_cloud_cta:
+            render_recorder_cta()
+    elif st.button("Iniciar otra sesión", use_container_width=True, type="primary"):
         reset_flow()
         st.rerun()
 
@@ -1246,17 +1260,16 @@ def render_cloud_viewer():
     st.markdown(
         """
         <section style="text-align:center; padding:2rem 0 1.2rem;">
-            <div class="brand">Glass</div>
             <h1 class="title">Glass</h1>
-            <div class="subtitle">Visor de reflejos persistidos</div>
+            <div class="subtitle">Tu observatorio de reflejos</div>
         </section>
         """,
         unsafe_allow_html=True,
     )
-    st.info(
-        "La grabación real está disponible solo en modo local. "
-        "En la nube, Glass funciona como visor de reflejos."
-    )
+
+    st.markdown('<div class="primary">', unsafe_allow_html=True)
+    render_recorder_cta()
+    st.markdown("</div>", unsafe_allow_html=True)
 
     session_id = safe_session_id(query_param("session_id"))
 
@@ -1271,35 +1284,21 @@ def render_cloud_viewer():
             st.session_state.observed_seconds = timestamp_to_seconds(
                 reflection.get("metadata", {}).get("duracion_hhmmss", "00:00:00.000")
             )
-            render_result()
+            render_result(show_brand=False, show_cloud_cta=False)
             return
         else:
             st.warning(
-                "Ese reflejo todavía no está disponible en MongoDB. "
-                "Si acabas de grabar, espera a que glass-api termine el análisis y actualiza esta página."
+                "Tu reflejo aún se está generando. Intenta actualizar en unos segundos."
             )
             return
 
-    st.markdown(
-        f"""
-        <div class="glass-card center-card">
-            <h3 style="margin-top:0;">Graba desde Glass Recorder Web</h3>
-            <p class="muted">Usa el grabador web para capturar desde celular o navegador. El video sube directo a Cloudinary y vuelve a Glass para generar tu reflejo.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown('<div class="primary">', unsafe_allow_html=True)
-    st.link_button("Abrir grabador", GLASS_RECORDER_WEB_URL, use_container_width=True, type="primary")
-    st.markdown("</div>", unsafe_allow_html=True)
-
     sessions = load_sessions()
     if not sessions:
-        st.warning("Aún no hay sesiones persistidas disponibles en MongoDB.")
+        st.warning("Aún no hay reflejos disponibles.")
         return
 
     st.session_state.active_session_id = sessions[0]["id"]
-    render_result()
+    render_result(show_brand=False, show_cloud_cta=False)
 
 
 def main():
