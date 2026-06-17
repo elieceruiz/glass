@@ -1192,18 +1192,18 @@ def render_result(show_brand=True, show_cloud_cta=True):
 
     brand_html = '<div class="brand">Glass</div>' if show_brand else ""
     st.markdown(
-        f"""
-        <section style="text-align:center; padding:2rem 0 1.2rem;">
-            {brand_html}
-            <h1 class="title">Tu Reflejo</h1>
-            <div class="subtitle">Así se fue tu tiempo.</div>
-        </section>
-        <div class="metric-row">
-            <div class="soft-metric"><span class="muted">Duración observada</span><b>{duration}</b></div>
-            <div class="soft-metric"><span class="muted">Momentos principales</span><b>{len(timeline)}</b></div>
-            <div class="soft-metric"><span class="muted">Lectura</span><b>{"lista" if timeline else "pendiente"}</b></div>
-        </div>
-        """,
+        (
+            '<section style="text-align:center; padding:2rem 0 1.2rem;">'
+            f"{brand_html}"
+            '<h1 class="title">Tu Reflejo</h1>'
+            '<div class="subtitle">Así se fue tu tiempo.</div>'
+            "</section>"
+            '<div class="metric-row">'
+            f'<div class="soft-metric"><span class="muted">Duración observada</span><b>{duration}</b></div>'
+            f'<div class="soft-metric"><span class="muted">Momentos principales</span><b>{len(timeline)}</b></div>'
+            f'<div class="soft-metric"><span class="muted">Lectura</span><b>{"lista" if timeline else "pendiente"}</b></div>'
+            "</div>"
+        ),
         unsafe_allow_html=True,
     )
 
